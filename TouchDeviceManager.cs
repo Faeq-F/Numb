@@ -1,8 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Linq;
-using System.Management;
+using System.IO;
 using System.Security.Principal;
 
 namespace Numb
@@ -10,60 +9,37 @@ namespace Numb
   public static class TouchDeviceManager
   {
     private static readonly List<string> _disabledTouchDeviceIds = new();
+    private static readonly string[] NewLineSeparators = ["\r\n", "\n"];
 
-    public static void SetTouchScreenState(bool enable)
+    public static void SetTouchScreenState(bool enable, Settings settings)
     {
       try
       {
         if (!enable)
         {
-          // Query active touchscreen devices to disable
-          ManagementObjectSearcher searcher = new(
-              "SELECT * FROM Win32_PnPEntity WHERE Name LIKE '%touch screen%' OR Name LIKE '%touchscreen%'"
-          );
-
-          foreach (ManagementObject device in searcher.Get().Cast<ManagementObject>())
+          List<string> activeIds = GetTouchDeviceInstanceIds(settings);
+          foreach (string id in activeIds)
           {
-            string pnpDeviceId = device["PNPDeviceID"]?.ToString() ?? "";
-            if (!string.IsNullOrEmpty(pnpDeviceId))
+            if (!_disabledTouchDeviceIds.Contains(id))
             {
-              if (!_disabledTouchDeviceIds.Contains(pnpDeviceId))
-              {
-                _disabledTouchDeviceIds.Add(pnpDeviceId);
-              }
-              ExecutePnpUtil("/disable-device", pnpDeviceId);
+              _disabledTouchDeviceIds.Add(id);
             }
+            ExecutePnpUtil("/disable-device", id);
           }
         }
         else
         {
-          // Re-enable cached devices as well as any WMI touch entities
+          // Re-enable cached devices as well as any other touch screen devices we discover
           HashSet<string> targetIds = new(_disabledTouchDeviceIds);
-
-          try
+          List<string> allIds = GetTouchDeviceInstanceIds(settings);
+          foreach (string id in allIds)
           {
-            // Backup search for any other touch screens that might be disabled
-            ManagementObjectSearcher searcher = new(
-                "SELECT * FROM Win32_PnPEntity WHERE Name LIKE '%touch screen%' OR Name LIKE '%touchscreen%'"
-            );
-
-            foreach (ManagementObject device in searcher.Get().Cast<ManagementObject>())
-            {
-              string id = device["PNPDeviceID"]?.ToString() ?? "";
-              if (!string.IsNullOrEmpty(id))
-              {
-                targetIds.Add(id);
-              }
-            }
-          }
-          catch (Exception wmiEx)
-          {
-            Debug.WriteLine($"WMI backup query failed: {wmiEx.Message}");
+            targetIds.Add(id);
           }
 
-          foreach (string pnpDeviceId in targetIds)
+          foreach (string id in targetIds)
           {
-            ExecutePnpUtil("/enable-device", pnpDeviceId);
+            ExecutePnpUtil("/enable-device", id);
           }
 
           _disabledTouchDeviceIds.Clear();
@@ -71,8 +47,91 @@ namespace Numb
       }
       catch (Exception ex)
       {
-        Debug.WriteLine($"TouchDeviceManager error: {ex.Message}");
+        Debug.WriteLine($"TouchDeviceManager error: {ex.Message}\n{ex.StackTrace}");
       }
+    }
+
+    private static List<string> GetTouchDeviceInstanceIds(Settings settings)
+    {
+      List<string> deviceIds = new();
+      if (!settings.TouchFilterByName)
+      {
+        // Use user-provided exact IDs
+        string[] ids = settings.TouchDeviceIds.Split(',', StringSplitOptions.RemoveEmptyEntries);
+        foreach (string id in ids)
+        {
+          string trimmedId = id.Trim();
+          if (!string.IsNullOrEmpty(trimmedId))
+          {
+            deviceIds.Add(trimmedId);
+          }
+        }
+        return deviceIds;
+      }
+
+      // Filter by Name
+      try
+      {
+        ProcessStartInfo startInfo = new()
+        {
+          FileName = GetPnpUtilPath(),
+          Arguments = "/enum-devices",
+          UseShellExecute = false,
+          CreateNoWindow = true,
+          RedirectStandardOutput = true,
+          RedirectStandardError = true
+        };
+
+        using Process? process = Process.Start(startInfo);
+        if (process != null)
+        {
+          string output = process.StandardOutput.ReadToEnd();
+          process.WaitForExit(5000);
+
+          string[] lines = output.Split(NewLineSeparators, StringSplitOptions.RemoveEmptyEntries);
+          string currentInstanceId = "";
+          bool isTouchDevice = false;
+
+          string[] names = settings.TouchDeviceNames.Split(',', StringSplitOptions.RemoveEmptyEntries);
+
+          foreach (string line in lines)
+          {
+            if (line.StartsWith("Instance ID:"))
+            {
+              if (isTouchDevice && !string.IsNullOrEmpty(currentInstanceId))
+              {
+                deviceIds.Add(currentInstanceId);
+              }
+
+              currentInstanceId = line.Substring("Instance ID:".Length).Trim();
+              isTouchDevice = false;
+            }
+            else if (line.StartsWith("Device Description:"))
+            {
+              string desc = line.Substring("Device Description:".Length).Trim();
+              foreach (string name in names)
+              {
+                if (desc.Contains(name.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                  isTouchDevice = true;
+                  break;
+                }
+              }
+            }
+          }
+
+          if (isTouchDevice && !string.IsNullOrEmpty(currentInstanceId))
+          {
+            deviceIds.Add(currentInstanceId);
+          }
+        }
+      }
+      catch (Exception ex)
+      {
+        Debug.WriteLine($"Failed to enumerate devices via pnputil: {ex.Message}");
+      }
+
+      return deviceIds;
     }
 
     private static bool IsElevated()
@@ -82,11 +141,18 @@ namespace Numb
       return principal.IsInRole(WindowsBuiltInRole.Administrator);
     }
 
+    private static string GetPnpUtilPath()
+    {
+      string windir = Environment.GetEnvironmentVariable("windir") ?? @"C:\Windows";
+      string subfolder = Environment.Is64BitOperatingSystem && !Environment.Is64BitProcess ? "Sysnative" : "System32";
+      return Path.Combine(windir, subfolder, "pnputil.exe");
+    }
+
     private static void ExecutePnpUtil(string action, string pnpDeviceId)
     {
       ProcessStartInfo startInfo = new()
       {
-        FileName = "pnputil.exe",
+        FileName = GetPnpUtilPath(),
         Arguments = $"{action} \"{pnpDeviceId}\"",
         UseShellExecute = !IsElevated()
       };
@@ -95,22 +161,38 @@ namespace Numb
       {
         startInfo.Verb = "runas";
         startInfo.WindowStyle = ProcessWindowStyle.Hidden;
+
+        try
+        {
+          using Process? process = Process.Start(startInfo);
+          process?.WaitForExit(5000);
+        }
+        catch (Exception ex)
+        {
+          Debug.WriteLine($"Elevation Exception: {ex.Message}");
+        }
       }
       else
       {
         startInfo.CreateNoWindow = true;
-      }
+        startInfo.RedirectStandardOutput = true;
+        startInfo.RedirectStandardError = true;
 
-      try
-      {
-        using Process? process = Process.Start(startInfo);
-        process?.WaitForExit(5000);
-      }
-      catch (Exception ex)
-      {
-        Debug.WriteLine($"Failed to execute pnputil: {ex.Message}");
+        try
+        {
+          using Process? process = Process.Start(startInfo);
+          if (process != null)
+          {
+            string output = process.StandardOutput.ReadToEnd();
+            string error = process.StandardError.ReadToEnd();
+            process.WaitForExit(5000);
+          }
+        }
+        catch (Exception ex)
+        {
+          Debug.WriteLine($"Exception: {ex.Message}");
+        }
       }
     }
   }
 }
-
