@@ -1,0 +1,29 @@
+<Window x:Class="Numb.CountdownWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Countdown" Height="180" Width="320"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent"
+        Topmost="True" WindowStartupLocation="CenterScreen" ShowInTaskbar="False">
+    <Border CornerRadius="12" Background="{DynamicResource ThemeBackgroundBrush}" BorderBrush="{DynamicResource ThemeBorderBrush}" BorderThickness="1.5" Padding="20">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,0,0,15">
+                <TextBlock x:Name="CountdownText" Text="Locking in 5s..." FontSize="24" FontWeight="Bold" Foreground="{DynamicResource ThemeTextBrush}" HorizontalAlignment="Center"/>
+                <TextBlock Text="Press Cancel to abort" FontSize="12" Foreground="{DynamicResource ThemeSecondaryTextBrush}" Margin="0,4,0,0" HorizontalAlignment="Center"/>
+            </StackPanel>
+
+            <Button Grid.Row="1" Content="Cancel" Width="100" Height="30" Click="CancelButton_Click" IsCancel="True"
+                    Background="{DynamicResource ThemeControlBackgroundBrush}" Foreground="{DynamicResource ThemeTextBrush}" FontWeight="SemiBold" BorderThickness="0">
+                <Button.Resources>
+                    <Style TargetType="Border">
+                        <Setter Property="CornerRadius" Value="6"/>
+                    </Style>
+                </Button.Resources>
+            </Button>
+        </Grid>
+    </Border>
+</Window>
