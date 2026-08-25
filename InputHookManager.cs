@@ -23,9 +23,14 @@ namespace Numb
     private IntPtr _keyboardHookId = IntPtr.Zero;
     private IntPtr _mouseHookId = IntPtr.Zero;
 
+    public HotkeyConfig Hotkey { get; set; } = new();
+    public bool LockMouse { get; set; } = true;
+    public bool LockKeyboard { get; set; } = true;
+    public bool UnlockWithCtrlAltDel { get; set; } = false;
+
     public bool IsLocked { get; private set; }
 
-    public event EventHandler? UnlockRequested;
+    public event EventHandler? HotkeyTriggered;
     public event EventHandler? LockStateChanged;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -38,50 +43,57 @@ namespace Numb
       public IntPtr dwExtraInfo;
     }
 
-    public void StartLock()
+    public void StartHook()
     {
-      if (IsLocked)
+      if (_keyboardHookId != IntPtr.Zero)
       {
         return;
       }
-
 
       _keyboardProc = KeyboardHookCallback;
-      _mouseProc = MouseHookCallback;
-
-      using (Process curProcess = Process.GetCurrentProcess())
-      using (ProcessModule curModule = curProcess.MainModule!)
-      {
-        IntPtr moduleHandle = GetModuleHandle(curModule.ModuleName);
-        _keyboardHookId = SetWindowsHookEx(WH_KEYBOARD_LL, _keyboardProc, moduleHandle, 0);
-        _mouseHookId = SetWindowsHookEx(WH_MOUSE_LL, _mouseProc, moduleHandle, 0);
-      }
-
-      IsLocked = true;
-      LockStateChanged?.Invoke(this, EventArgs.Empty);
+      using Process curProcess = Process.GetCurrentProcess();
+      using ProcessModule curModule = curProcess.MainModule!;
+      IntPtr moduleHandle = GetModuleHandle(curModule.ModuleName);
+      _keyboardHookId = SetWindowsHookEx(WH_KEYBOARD_LL, _keyboardProc, moduleHandle, 0);
     }
 
-    public void StopLock()
+    public void StopHook()
     {
-      if (!IsLocked)
-      {
-        return;
-      }
-
+      SetLockState(false, false, false);
 
       if (_keyboardHookId != IntPtr.Zero)
       {
         UnhookWindowsHookEx(_keyboardHookId);
         _keyboardHookId = IntPtr.Zero;
       }
+    }
 
-      if (_mouseHookId != IntPtr.Zero)
+    public void SetLockState(bool locked, bool lockMouse, bool lockKeyboard)
+    {
+      IsLocked = locked;
+      LockMouse = lockMouse;
+      LockKeyboard = lockKeyboard;
+
+      if (locked)
       {
-        UnhookWindowsHookEx(_mouseHookId);
-        _mouseHookId = IntPtr.Zero;
+        if (LockMouse && _mouseHookId == IntPtr.Zero)
+        {
+          _mouseProc = MouseHookCallback;
+          using Process curProcess = Process.GetCurrentProcess();
+          using ProcessModule curModule = curProcess.MainModule!;
+          IntPtr moduleHandle = GetModuleHandle(curModule.ModuleName);
+          _mouseHookId = SetWindowsHookEx(WH_MOUSE_LL, _mouseProc, moduleHandle, 0);
+        }
+      }
+      else
+      {
+        if (_mouseHookId != IntPtr.Zero)
+        {
+          UnhookWindowsHookEx(_mouseHookId);
+          _mouseHookId = IntPtr.Zero;
+        }
       }
 
-      IsLocked = false;
       LockStateChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -137,23 +149,38 @@ namespace Numb
 
         }
 
-        // Check unlock shortcut on KeyDown
-        if (isKeyDown && key == Keys.U)
+        // Check hotkey combination on KeyDown
+        if (isKeyDown && key == Hotkey.Key)
         {
           // Fallback: also check GetAsyncKeyState in case modifier was pressed prior to hook activation
           bool ctrlActive = _isCtrlDown || (GetAsyncKeyState((int)Keys.ControlKey) & 0x8000) != 0;
           bool altActive = _isAltDown || (GetAsyncKeyState((int)Keys.Menu) & 0x8000) != 0;
           bool shiftActive = _isShiftDown || (GetAsyncKeyState((int)Keys.ShiftKey) & 0x8000) != 0;
 
-          if (ctrlActive && altActive && shiftActive)
+          if (ctrlActive == Hotkey.Ctrl && altActive == Hotkey.Alt && shiftActive == Hotkey.Shift)
           {
-            UnlockRequested?.Invoke(this, EventArgs.Empty);
-            return CallNextHookEx(_keyboardHookId, nCode, wParam, lParam);
+            HotkeyTriggered?.Invoke(this, EventArgs.Empty);
+            // Swallowed so hotkey doesn't type/interfere
+            return 1;
+          }
+        }
+
+        // Check Ctrl+Alt+Del for unblocking if enabled and locked
+        if (UnlockWithCtrlAltDel && isKeyDown && key == Keys.Delete)
+        {
+          bool ctrlActive = _isCtrlDown || (GetAsyncKeyState((int)Keys.ControlKey) & 0x8000) != 0;
+          bool altActive = _isAltDown || (GetAsyncKeyState((int)Keys.Menu) & 0x8000) != 0;
+          if (ctrlActive && altActive)
+          {
+            if (IsLocked)
+            {
+              HotkeyTriggered?.Invoke(this, EventArgs.Empty);
+            }
           }
         }
       }
 
-      if (IsLocked)
+      if (IsLocked && LockKeyboard)
       {
         // Suppress input
         return 1;
@@ -164,7 +191,7 @@ namespace Numb
 
     private IntPtr MouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
-      if (IsLocked && nCode >= 0)
+      if (IsLocked && LockMouse && nCode >= 0)
       {
         // Suppress mouse input
         return 1;
@@ -175,7 +202,7 @@ namespace Numb
 
     public void Dispose()
     {
-      StopLock();
+      StopHook();
       GC.SuppressFinalize(this);
     }
 
